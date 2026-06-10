@@ -11,13 +11,21 @@ google-pasta
 jupyter
 pydot
 boto3
+
+numpy
+scikit-learn
+torch
+timm
+ray[tune]
+autokeras
+
 tensorflow==2.19.1
+tf-keras==2.19.0
+tensorflow-datasets
 keras-cv
 keras-nlp
 keras-tuner
-tf-keras==2.19.0
 keras-hub
 keras-rs
-pymdown-extensions==10.20
-tensorflow-datasets
 
+pymdown-extensions==10.20
