@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Colorectal Classifier</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <style>
+      body { font-family: Arial, sans-serif; padding: 24px; }
+      .row { margin-bottom: 12px; }
+      .result { margin-top: 16px; padding: 12px; border: 1px solid #ddd; }
+    </style>
+  </head>
+  <body>
+    <h2>Colorectal Patch Classifier</h2>
+
+    <div class="row">
+      <label>语言 / Language:
+        <select id="lang">
+          <option value="cn">中文 (CN)</option>
+          <option value="en">English (EN)</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="row">
+      <label>模式 / Mode:
+        <select id="task">
+          <option value="multiclass">Multiclass (8-class)</option>
+          <option value="binary">Binary (tumor vs non_tumor)</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="row">
+      <label>模型 / Model:
+        <select id="model_type">
+          <option value="vit">ViT (PyTorch)</option>
+          <option value="autokeras">AutoKeras (Keras)</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="row">
+      <input type="file" id="image_input" accept="image/*" />
+    </div>
+
+    <div class="row">
+      <button id="predict_btn">Predict</button>
+      <a href="/visualize" style="margin-left: 16px;">View visualizations</a>
+    </div>
+
+    <div id="preview" class="row"></div>
+    <div id="result" class="result" style="display:none"></div>
+
+    <script src="/static/script.js"></script>
+  </body>
+</html>

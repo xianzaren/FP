@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Visualization Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <h2>Visualization Dashboard</h2>
+    <p>Select a task to view the saved output charts and visualization images from the trained models.</p>
+
+    <div class="row">
+      <label>Task:
+        <select id="taskSelect">
+          {% for task in tasks %}
+            <option value="{{ task }}">{{ task }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+
+    <div id="imageGrid" class="image-grid"></div>
+
+    <script>
+      const allImages = {{ images | tojson }};
+      const taskSelect = document.getElementById('taskSelect');
+      const imageGrid = document.getElementById('imageGrid');
+
+      function renderImages(task) {
+        imageGrid.innerHTML = '';
+        const selectedImages = allImages[task] || [];
+        if (selectedImages.length === 0) {
+          imageGrid.innerHTML = '<p>No visualization images available for this task.</p>';
+          return;
+        }
+
+        selectedImages.forEach((fileName) => {
+          const card = document.createElement('div');
+          card.className = 'image-card';
+          const img = document.createElement('img');
+          img.src = `/visualize_image/${task}/${encodeURIComponent(fileName)}`;
+          img.alt = fileName;
+          const caption = document.createElement('div');
+          caption.className = 'image-caption';
+          caption.textContent = fileName;
+          card.appendChild(img);
+          card.appendChild(caption);
+          imageGrid.appendChild(card);
+        });
+      }
+
+      taskSelect.addEventListener('change', () => renderImages(taskSelect.value));
+      renderImages(taskSelect.value);
+    </script>
+  </body>
+</html>

@@ -1,0 +1,8 @@
+body { font-family: Arial, sans-serif; padding: 24px; background: #f7f8fb; color: #222; }
+.row { margin-bottom: 14px; }
+button { padding: 8px 14px; font-size: 14px; cursor: pointer; }
+.result { margin-top: 16px; padding: 14px; border: 1px solid #ddd; background: #fff; border-radius: 6px; }
+.image-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin-top: 18px; }
+.image-card { background: #fff; border: 1px solid #ddd; padding: 12px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+.image-card img { width: 100%; height: auto; display: block; border-radius: 6px; margin-bottom: 8px; }
+.image-caption { font-size: 13px; color: #555; word-break: break-word; }
