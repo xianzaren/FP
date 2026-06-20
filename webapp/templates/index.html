@@ -12,19 +12,19 @@
     </style>
   </head>
   <body>
-    <h2>Colorectal Patch Classifier</h2>
+    <h2 id="pageTitle">Colorectal Patch Classifier</h2>
 
     <div class="row">
-      <label>语言 / Language:
+      <label><span id="langLabel">Language:</span>
         <select id="lang">
+          <option value="en" selected>English (EN)</option>
           <option value="cn">中文 (CN)</option>
-          <option value="en">English (EN)</option>
         </select>
       </label>
     </div>
 
     <div class="row">
-      <label>模式 / Mode:
+      <label><span id="taskLabel">Mode:</span>
         <select id="task">
           <option value="multiclass">Multiclass (8-class)</option>
           <option value="binary">Binary (tumor vs non_tumor)</option>
@@ -33,7 +33,7 @@
     </div>
 
     <div class="row">
-      <label>模型 / Model:
+      <label><span id="modelLabel">Model:</span>
         <select id="model_type">
           <option value="vit">ViT (PyTorch)</option>
           <option value="autokeras">AutoKeras (Keras)</option>
@@ -41,13 +41,30 @@
       </label>
     </div>
 
+    {% if sample_images %}
     <div class="row">
-      <input type="file" id="image_input" accept="image/*" />
+      <h3 id="sampleTitle">Sample Images</h3>
+      <div class="sample-grid">
+        {% for image in sample_images %}
+          <div class="sample-card">
+            <img src="/sample_image/{{ image }}" alt="{{ image }}" />
+            <div class="image-caption">{{ image }}</div>
+          </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+
+    <div class="row">
+      <label><span id="imageLabel">Choose image:</span></label>
+      <button id="choose_file_btn" type="button">Choose file</button>
+      <span id="chosen_file_name" style="margin-left: 10px; color: #555;">No file chosen</span>
+      <input type="file" id="image_input" accept="image/*" style="display:none" />
     </div>
 
     <div class="row">
       <button id="predict_btn">Predict</button>
-      <a href="/visualize" style="margin-left: 16px;">View visualizations</a>
+      <a id="visualize_link" href="/visualize" style="margin-left: 16px;">View visualizations</a>
     </div>
 
     <div id="preview" class="row"></div>
