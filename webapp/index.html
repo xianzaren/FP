@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FP Histopathology Dashboard</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="hero">
+    <div class="hero-content">
+      <h1>FP Histopathology Vision Transformer Dashboard</h1>
+      <p>可视化训练结果、评估指标和模型注意力图。使用 `python -m http.server` 从这里启动一个简易本地页面。</p>
+      <div class="hero-actions">
+        <a class="button" href="../output/colorectal_exp_auto/multiclass/" target="_blank">Multiclass 输出</a>
+        <a class="button button-secondary" href="../output/colorectal_exp_auto/binary/" target="_blank">Binary 输出</a>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="panel">
+      <h2>说明</h2>
+      <p>这是一个简单的结果汇总页面，聚合了 `FP/output/colorectal_exp_auto/` 下的 ViT 训练输出文件。</p>
+      <ul>
+        <li>支持查看二分类和多分类结果</li>
+        <li>展示训练曲线、混淆矩阵、ROC/PR 曲线、误分类补丁和注意力图</li>
+        <li>若文件存在则显示预览，否则自动隐藏</li>
+      </ul>
+    </section>
+
+    <section class="panel" id="multiclass-panel">
+      <div class="panel-header">
+        <h2>Multiclass 结果</h2>
+        <p class="panel-meta">任务：8 类组织分类</p>
+      </div>
+      <div class="metrics" id="multiclass-metrics">
+        <p>正在加载多分类结果...</p>
+      </div>
+      <div class="image-grid" id="multiclass-images">
+        <article class="image-card">
+          <h3>训练/验证损失</h3>
+          <img src="../output/colorectal_exp_auto/multiclass/raytuned_loss.png" alt="Multiclass Loss" onerror="hideImageCard(this)" />
+        </article>
+        <article class="image-card">
+          <h3>训练/验证准确率</h3>
+          <img src="../output/colorectal_exp_auto/multiclass/raytuned_accuracy.png" alt="Multiclass Accuracy" onerror="hideImageCard(this)" />
+        </article>
+        <article class="image-card">
+          <h3>混淆矩阵</h3>
+          <img src="../output/colorectal_exp_auto/multiclass/raytuned_confusion_matrix.png" alt="Multiclass Confusion Matrix" onerror="hideImageCard(this)" />
+        </article>
+        <article class="image-card">
+          <h3>ROC 曲线</h3>
+          <img src="../output/colorectal_exp_auto/multiclass/raytuned_roc_curve.png" alt="Multiclass ROC Curve" onerror="hideImageCard(this)" />
+        </article>
+        <article class="image-card">
+          <h3>PR 曲线</h3>
+          <img src="../output/colorectal_exp_auto/multiclass/raytuned_pr_curve.png" alt="Multiclass PR Curve" onerror="hideImageCard(this)" />
+        </article>
+        <article class="image-card">
+          <h3>误分类补丁</h3>
+          <img src="../output/colorectal_exp_auto/multiclass/raytuned_misclassified_patches.png" alt="Multiclass Misclassified Patches" onerror="hideImageCard(this)" />
+        </article>
+      </div>
+    </section>
+
+    <section class="panel" id="binary-panel">
+      <div class="panel-header">
+        <h2>Binary 结果</h2>
+        <p class="panel-meta">任务：肿瘤补丁 vs 非肿瘤补丁</p>
+      </div>
+      <div class="metrics" id="binary-metrics">
+        <p>正在加载二分类结果...</p>
+      </div>
+      <div class="image-grid" id="binary-images">
+        <article class="image-card">
+          <h3>训练/验证损失</h3>
+          <img src="../output/colorectal_exp_auto/binary/raytuned_loss.png" alt="Binary Loss" onerror="hideImageCard(this)" />
+        </article>
+        <article class="image-card">
+          <h3>训练/验证准确率</h3>
+          <img src="../output/colorectal_exp_auto/binary/raytuned_accuracy.png" alt="Binary Accuracy" onerror="hideImageCard(this)" />
+        </article>
+        <article class="image-card">
+          <h3>混淆矩阵</h3>
+          <img src="../output/colorectal_exp_auto/binary/raytuned_confusion_matrix.png" alt="Binary Confusion Matrix" onerror="hideImageCard(this)" />
+        </article>
+        <article class="image-card">
+          <h3>ROC 曲线</h3>
+          <img src="../output/colorectal_exp_auto/binary/raytuned_roc_curve.png" alt="Binary ROC Curve" onerror="hideImageCard(this)" />
+        </article>
+        <article class="image-card">
+          <h3>PR 曲线</h3>
+          <img src="../output/colorectal_exp_auto/binary/raytuned_pr_curve.png" alt="Binary PR Curve" onerror="hideImageCard(this)" />
+        </article>
+        <article class="image-card">
+          <h3>注意力图</h3>
+          <img src="../output/colorectal_exp_auto/binary/raytuned_attention_map.png" alt="Binary Attention Map" onerror="hideImageCard(this)" />
+        </article>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <h2>启动指南</h2>
+      </div>
+      <div class="guide">
+        <p>推荐使用本地静态服务器打开页面，避免浏览器文件协议限制。</p>
+        <pre><code>cd webapp
+python -m http.server 8000</code></pre>
+        <p>然后打开：</p>
+        <p><a href="http://127.0.0.1:8000" target="_blank">http://127.0.0.1:8000</a></p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>FP 仓库可视化仪表盘 · 目前仅展示 `output/colorectal_exp_auto/` 下已生成的结果。</p>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>

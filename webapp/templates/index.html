@@ -3,73 +3,152 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Colorectal Classifier</title>
-    <link rel="stylesheet" href="/static/style.css" />
-    <style>
-      body { font-family: Arial, sans-serif; padding: 24px; }
-      .row { margin-bottom: 12px; }
-      .result { margin-top: 16px; padding: 12px; border: 1px solid #ddd; }
-    </style>
+    <title>Colorectal ViT Lab</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
   </head>
   <body>
-    <h2 id="pageTitle">Colorectal Patch Classifier</h2>
+    <main class="app-shell">
+      <header class="hero">
+        <a class="brand" href="/" aria-label="Colorectal ViT Lab home">CVL</a>
+        <div class="hero-copy">
+          <p class="eyebrow">Histopathology experiment console</p>
+          <h1>Colorectal <em>ViT Lab</em></h1>
+          <p class="lede">Train a defined architecture, inspect its attention maps, and predict with the matching checkpoint.</p>
+        </div>
+        <a class="text-link" href="/visualize">Open results gallery <span aria-hidden="true">&#8599;</span></a>
+      </header>
 
-    <div class="row">
-      <label><span id="langLabel">Language:</span>
-        <select id="lang">
-          <option value="en" selected>English (EN)</option>
-          <option value="cn">中文 (CN)</option>
-        </select>
-      </label>
-    </div>
-
-    <div class="row">
-      <label><span id="taskLabel">Mode:</span>
-        <select id="task">
-          <option value="multiclass">Multiclass (8-class)</option>
-          <option value="binary">Binary (tumor vs non_tumor)</option>
-        </select>
-      </label>
-    </div>
-
-    <div class="row">
-      <label><span id="modelLabel">Model:</span>
-        <select id="model_type">
-          <option value="vit">ViT (PyTorch)</option>
-          <option value="autokeras">AutoKeras (Keras)</option>
-        </select>
-      </label>
-    </div>
-
-    {% if sample_images %}
-    <div class="row">
-      <h3 id="sampleTitle">Sample Images</h3>
-      <div class="sample-grid">
-        {% for image in sample_images %}
-          <div class="sample-card">
-            <img src="/sample_image/{{ image }}" alt="{{ image }}" />
-            <div class="image-caption">{{ image }}</div>
+      <section class="workspace-grid">
+        <article class="panel prediction-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">1. Prediction</p>
+              <h2>Choose a saved experiment</h2>
+            </div>
+            <span id="checkpoint-badge" class="status-badge neutral">Loading checkpoints</span>
           </div>
-        {% endfor %}
-      </div>
-    </div>
-    {% endif %}
 
-    <div class="row">
-      <label><span id="imageLabel">Choose image:</span></label>
-      <button id="choose_file_btn" type="button">Choose file</button>
-      <span id="chosen_file_name" style="margin-left: 10px; color: #555;">No file chosen</span>
-      <input type="file" id="image_input" accept="image/*" style="display:none" />
-    </div>
+          <div class="control-grid">
+            <label class="control">
+              <span>Classification task</span>
+              <select id="task" name="task">
+                <option value="multiclass">Multiclass (8 tissue classes)</option>
+                <option value="binary">Binary (tumor / non-tumor)</option>
+              </select>
+            </label>
+            <label class="control">
+              <span>Prediction model</span>
+              <select id="model_type" name="model_type">
+                <option value="vit">ViT checkpoint</option>
+                <option value="autokeras">AutoKeras baseline</option>
+              </select>
+            </label>
+          </div>
 
-    <div class="row">
-      <button id="predict_btn">Predict</button>
-      <a id="visualize_link" href="/visualize" style="margin-left: 16px;">View visualizations</a>
-    </div>
+          <div id="vit-controls" class="architecture-card">
+            <div class="architecture-heading">
+              <div>
+                <p class="eyebrow">Experiment architecture</p>
+                <h3>Match the checkpoint exactly</h3>
+              </div>
+              <span class="hint" title="tiny, small and base are ViT capacity scales, not necessarily a different number of Transformer blocks.">i</span>
+            </div>
+            <div class="control-grid architecture-grid">
+              <label class="control">
+                <span>Input size</span>
+                <select id="image_size" name="image_size"></select>
+              </label>
+              <label class="control">
+                <span>Patch size</span>
+                <select id="patch_size" name="patch_size"></select>
+              </label>
+              <label class="control">
+                <span>ViT scale</span>
+                <select id="vit_depth" name="vit_depth"></select>
+              </label>
+            </div>
+            <p id="experiment-status" class="selection-note" aria-live="polite"></p>
+          </div>
 
-    <div id="preview" class="row"></div>
-    <div id="result" class="result" style="display:none"></div>
+          <div class="upload-zone">
+            <input type="file" id="image_input" accept="image/*" />
+            <div class="upload-copy">
+              <span class="upload-kicker">PATCH IMAGE</span>
+              <strong id="chosen_file_name">Drop an image or browse</strong>
+              <small>PNG, JPG, JPEG, GIF, or WebP</small>
+            </div>
+            <button id="choose_file_btn" class="button ghost" type="button">Browse files</button>
+          </div>
+          <div id="preview" class="preview" aria-live="polite"></div>
+          <button id="predict_btn" class="button primary" type="button">Predict selected patch</button>
+          <div id="result" class="result" role="status" hidden></div>
+        </article>
 
-    <script src="/static/script.js"></script>
+        <aside class="panel training-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">2. Training</p>
+              <h2>Run this architecture</h2>
+            </div>
+            <span class="orb" aria-hidden="true"></span>
+          </div>
+          <p class="panel-copy">The training job uses the task and architecture selected on the left, then runs Ray Tune followed by final training.</p>
+          <div class="control-grid compact-grid">
+            <label class="control">
+              <span>Ray Tune trials</span>
+              <select id="num_samples">
+                <option value="2">2 - quick check</option>
+                <option value="4" selected>4 - default</option>
+                <option value="8">8 - broader search</option>
+              </select>
+            </label>
+            <label class="control">
+              <span>Tune epochs</span>
+              <select id="tune_epochs">
+                <option value="3">3 - quick check</option>
+                <option value="6" selected>6 - default</option>
+                <option value="10">10 - extended</option>
+              </select>
+            </label>
+            <label class="control">
+              <span>Final epochs</span>
+              <select id="final_epochs">
+                <option value="15">15 - quick check</option>
+                <option value="30" selected>30 - default</option>
+                <option value="50">50 - extended</option>
+              </select>
+            </label>
+          </div>
+          <button id="start_training_btn" class="button dark" type="button">Start training run</button>
+          <p class="training-note">Only one job can run from this WebApp at a time. Training starts only after this button is pressed.</p>
+          <div class="job-status">
+            <div class="status-line">
+              <span id="training-badge" class="status-badge neutral">No active job</span>
+              <span id="training-meta"></span>
+            </div>
+            <pre id="training-log">No training output yet.</pre>
+          </div>
+        </aside>
+      </section>
+
+      {% if sample_images %}
+      <section class="sample-section">
+        <div class="section-heading">
+          <p class="eyebrow">Sample data</p>
+          <h2>Available pathology patches</h2>
+        </div>
+        <div class="sample-grid">
+          {% for image in sample_images %}
+          <figure class="sample-card">
+            <img src="/sample_image/{{ image }}" alt="{{ image }}" />
+            <figcaption>{{ image }}</figcaption>
+          </figure>
+          {% endfor %}
+        </div>
+      </section>
+      {% endif %}
+    </main>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
   </body>
 </html>

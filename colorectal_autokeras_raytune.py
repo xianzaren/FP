@@ -4,20 +4,22 @@ colorectal_autokeras_raytune_output_auto.py
 A modified version of the user's PyTorch/timm ViT colorectal histology experiment.
 It adds two optional optimisation/baseline routes and extra analysis outputs:
 
-1) Ray Tune mode: tune the existing PyTorch + timm ViT training configuration.
+1) Ray Tune mode: tune training hyperparameters for one fixed PyTorch + timm ViT architecture.
 2) AutoKeras mode: run a separate Keras/AutoKeras image-classification baseline.
 3) Final-train mode now saves ROC curves, ROC-AUC values, misclassified patch grids,
-   and an approximate ViT attention-rollout map.
-4) Both multiclass and patch-level binary tumor-vs-non-tumor tasks are supported.
-5) Binary outputs include tumor-focused precision/recall/F1, PR-AUC, PR curves,
+   and selected approximate ViT attention-rollout maps.
+4) ViT runs can ablate IMAGE_SIZE, patch size (16/32), and tiny/small/base capacity.
+5) Both multiclass and patch-level binary tumor-vs-non-tumor tasks are supported.
+6) Binary outputs include tumor-focused precision/recall/F1, PR-AUC, PR curves,
    and tumor false-positive/false-negative counts for imbalanced evaluation.
 
 Recommended workflow:
-    python colorectal_autokeras_raytune_enhanced.py --mode ray_tune --task multiclass --num-samples 6 --tune-epochs 6
-    python colorectal_autokeras_raytune_enhanced.py --mode final_train --task multiclass --config-json output/colorectal_exp_auto/multiclass/best_ray_config.json
+    python colorectal_autokeras_raytune_enhanced.py
+    python colorectal_autokeras_raytune_enhanced.py --mode auto_train --task multiclass --image-size 224 --patch-size 16 --vit-depth base
+    python colorectal_autokeras_raytune_enhanced.py --mode auto_train --task binary --image-size 384 --patch-size 32 --vit-depth small --use-class-weights
+    python colorectal_autokeras_raytune_enhanced.py --mode ray_tune --task multiclass --image-size 128 --patch-size 16 --vit-depth tiny --num-samples 6 --tune-epochs 6
+    python colorectal_autokeras_raytune_enhanced.py --mode final_train --task multiclass --image-size 224 --patch-size 16 --vit-depth base --config-json output/colorectal_exp_auto/multiclass/image224_patch16_base/best_ray_config.json
     python colorectal_autokeras_raytune_enhanced.py --mode autokeras --task multiclass --ak-max-trials 3 --ak-epochs 10
-    python colorectal_autokeras_raytune_enhanced.py --mode ray_tune --task binary --use-class-weights --num-samples 6 --tune-epochs 6
-    python colorectal_autokeras_raytune_enhanced.py --mode final_train --task binary --use-class-weights
 
 Install examples:
     pip install timm scikit-learn matplotlib numpy torch
@@ -28,7 +30,8 @@ Notes:
 - PyTorch/Ray Tune and AutoKeras are kept in separate modes to avoid mixing two training frameworks.
 - Ray Tune optimises validation macro-F1 by default.
 - The test set is used only after final model selection.
-- Input data is read from data/ and generated outputs are kept under output/colorectal_exp_auto/<task>/.
+- Input data is read from data/ and ViT outputs are kept under output/colorectal_exp_auto/<task>/image<image_size>_patch<patch_size>_<depth>/.
+- Default auto_train mode asks for binary vs multiclass, IMAGE_SIZE, patch size, and ViT depth before running Ray Tune followed by final training automatically.
 - Binary classification is implemented as patch-level tumor vs non-tumor, not patient-level diseased vs healthy.
 """
 
@@ -141,12 +144,26 @@ def get_num_classes(task: str) -> int:
     return len(get_class_names(task))
 
 
-def get_task_output_dir(task: str) -> str:
-    # Keep all outputs under output/colorectal_exp_auto/, but separate binary/multiclass
-    # runs to avoid overwriting configs, checkpoints, plots, and result JSON files.
-    return os.path.join(OUTPUT_DIR, task)
+def get_task_output_dir(
+    task: str,
+    image_size: Optional[int] = None,
+    patch_size: Optional[int] = None,
+    vit_depth: Optional[str] = None,
+) -> str:
+    """Return an isolated output directory for one task/ViT ablation."""
+    task_dir = os.path.join(OUTPUT_DIR, task)
+    if image_size is None and patch_size is None and vit_depth is None:
+        return task_dir
+    if image_size is None or patch_size is None or vit_depth is None:
+        raise ValueError("image_size, patch_size, and vit_depth must be provided together.")
+    return os.path.join(task_dir, f"image{image_size}_patch{patch_size}_{vit_depth}")
 
-IMAGE_SIZE = 224
+
+DEFAULT_IMAGE_SIZE = 224
+DEFAULT_PATCH_SIZE = 16
+DEFAULT_VIT_DEPTH = "base"
+# Keep this alias as a safe fallback for older saved configurations.
+IMAGE_SIZE = DEFAULT_IMAGE_SIZE
 VAL_SIZE = 0.1
 TEST_SIZE = 0.1
 NUM_WORKERS = 0
@@ -166,6 +183,30 @@ OUTPUT_DIR = "output/colorectal_exp_auto"
 RAY_DIR = OUTPUT_DIR
 AK_DIR = OUTPUT_DIR
 FINAL_DIR = OUTPUT_DIR
+
+
+def get_vit_model_name(vit_depth: str, patch_size: int) -> str:
+    """Map the architecture-ablation choices to the corresponding timm ViT name."""
+    valid_depths = {"tiny", "small", "base"}
+    if vit_depth not in valid_depths:
+        raise ValueError(f"Unknown ViT depth '{vit_depth}'. Choose tiny, small, or base.")
+    if patch_size not in {16, 32}:
+        raise ValueError(f"Unsupported patch size {patch_size}. Choose 16 or 32.")
+    return f"vit_{vit_depth}_patch{patch_size}_224"
+
+
+def validate_vit_architecture(image_size: int, patch_size: int, vit_depth: str):
+    if image_size <= 0:
+        raise ValueError("IMAGE_SIZE must be a positive integer.")
+    if image_size % patch_size != 0:
+        raise ValueError(
+            f"IMAGE_SIZE={image_size} must be divisible by patch_size={patch_size}."
+        )
+    get_vit_model_name(vit_depth, patch_size)
+
+
+def get_vit_output_dir(args) -> str:
+    return get_task_output_dir(args.task, args.image_size, args.patch_size, args.vit_depth)
 
 
 # -----------------------------------------------------------------------------
@@ -630,27 +671,25 @@ def save_vit_attention_map(
     y_pred,
     class_names,
     out_dir: str,
-    out_name: str = "raytuned_attention_map.png",
-    image_index: Optional[int] = None,
+    image_size: int,
+    out_name: str,
+    image_index: int,
+    selection_title: str,
 ):
-    """Save an approximate ViT attention-rollout map for one test patch.
+    """Save one approximate ViT attention-rollout map for a selected test patch.
 
-    This uses qkv hooks to reconstruct self-attention in timm ViT blocks. It is a
-    qualitative visualization, not a calibrated clinical explanation.
+    The map is a qualitative self-attention rollout reconstructed from timm ViT
+    QKV tensors. It is not a calibrated clinical explanation.
     """
     os.makedirs(out_dir, exist_ok=True)
     if not hasattr(model, "blocks"):
         print("Attention map skipped: model has no ViT blocks attribute.")
-        return
+        return False
 
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
-    if image_index is None:
-        wrong_idx = np.where(y_true != y_pred)[0]
-        if len(wrong_idx) > 0:
-            image_index = int(wrong_idx[0])
-        else:
-            image_index = 0
+    if image_index < 0 or image_index >= len(x_raw):
+        raise IndexError(f"Invalid attention-map image index: {image_index}")
 
     attentions = []
     hooks = []
@@ -658,14 +697,14 @@ def save_vit_attention_map(
     def make_hook(attn_module):
         def hook(module, inputs, output):
             # output shape: [B, N, 3*C]
-            B, N, three_C = output.shape
+            batch_size, num_tokens, three_channels = output.shape
             num_heads = attn_module.num_heads
-            head_dim = three_C // 3 // num_heads
-            qkv = output.reshape(B, N, 3, num_heads, head_dim).permute(2, 0, 3, 1, 4)
+            head_dim = three_channels // 3 // num_heads
+            qkv = output.reshape(batch_size, num_tokens, 3, num_heads, head_dim)
+            qkv = qkv.permute(2, 0, 3, 1, 4)
             q, k = qkv[0], qkv[1]
-            attn = (q @ k.transpose(-2, -1)) * attn_module.scale
-            attn = attn.softmax(dim=-1)
-            attentions.append(attn.detach().cpu())
+            attention = (q @ k.transpose(-2, -1)) * attn_module.scale
+            attentions.append(attention.softmax(dim=-1).detach().cpu())
         return hook
 
     try:
@@ -675,39 +714,43 @@ def save_vit_attention_map(
 
         device = next(model.parameters()).device
         model.eval()
-        xb = _preprocess_one_image_for_vit(x_raw[image_index], IMAGE_SIZE).to(device)
+        xb = _preprocess_one_image_for_vit(x_raw[image_index], image_size).to(device)
         with torch.no_grad():
             _ = model(xb)
     finally:
-        for h in hooks:
-            h.remove()
+        for hook_handle in hooks:
+            hook_handle.remove()
 
     if not attentions:
         print("Attention map skipped: no attention tensors captured.")
-        return
+        return False
 
     rollout = None
-    for attn in attentions:
+    for attention in attentions:
         # [B, heads, tokens, tokens] -> [tokens, tokens]
-        attn_mean = attn[0].mean(dim=0)
-        eye = torch.eye(attn_mean.size(0))
-        attn_aug = attn_mean + eye
-        attn_aug = attn_aug / attn_aug.sum(dim=-1, keepdim=True)
-        rollout = attn_aug if rollout is None else attn_aug @ rollout
+        attention_mean = attention[0].mean(dim=0)
+        attention_augmented = attention_mean + torch.eye(attention_mean.size(0))
+        attention_augmented = attention_augmented / attention_augmented.sum(dim=-1, keepdim=True)
+        rollout = attention_augmented if rollout is None else attention_augmented @ rollout
 
-    cls_attention = rollout[0, 1:].numpy()
-    grid_size = int(np.sqrt(cls_attention.shape[0]))
-    if grid_size * grid_size != cls_attention.shape[0]:
+    class_attention = rollout[0, 1:].numpy()
+    grid_size = int(np.sqrt(class_attention.shape[0]))
+    if grid_size * grid_size != class_attention.shape[0]:
         print("Attention map skipped: patch token count is not square.")
-        return
+        return False
 
-    attn_map = cls_attention.reshape(grid_size, grid_size)
-    attn_map = torch.tensor(attn_map)[None, None, :, :].float()
-    attn_map = F.interpolate(attn_map, size=(IMAGE_SIZE, IMAGE_SIZE), mode="bilinear", align_corners=False)
-    attn_map = attn_map.squeeze().numpy()
-    attn_map = (attn_map - attn_map.min()) / (attn_map.max() - attn_map.min() + 1e-8)
+    attention_map = class_attention.reshape(grid_size, grid_size)
+    attention_map = torch.tensor(attention_map)[None, None, :, :].float()
+    attention_map = F.interpolate(
+        attention_map,
+        size=(image_size, image_size),
+        mode="bilinear",
+        align_corners=False,
+    )
+    attention_map = attention_map.squeeze().numpy()
+    attention_map = (attention_map - attention_map.min()) / (attention_map.max() - attention_map.min() + 1e-8)
 
-    raw_resized = resize_bilinear_uint8_hwc(x_raw[image_index], IMAGE_SIZE)
+    raw_resized = resize_bilinear_uint8_hwc(x_raw[image_index], image_size)
     true_label = int(y_true[image_index])
     pred_label = int(y_pred[image_index])
 
@@ -718,32 +761,134 @@ def save_vit_attention_map(
     plt.title("Original patch")
 
     plt.subplot(1, 3, 2)
-    plt.imshow(attn_map, cmap="inferno")
+    plt.imshow(attention_map, cmap="inferno")
     plt.axis("off")
     plt.title("Attention rollout")
 
     plt.subplot(1, 3, 3)
     plt.imshow(raw_resized)
-    plt.imshow(attn_map, cmap="inferno", alpha=0.45)
+    plt.imshow(attention_map, cmap="inferno", alpha=0.45)
     plt.axis("off")
-    plt.title(f"T: {class_names[true_label]}\nP: {class_names[pred_label]}")
+    plt.title(f"{selection_title}\nT: {class_names[true_label]} | P: {class_names[pred_label]}")
 
     plt.tight_layout()
-    path = os.path.join(out_dir, out_name)
-    plt.savefig(path, dpi=200, bbox_inches="tight")
-    print("Saved:", path)
+    output_path = os.path.join(out_dir, out_name)
+    plt.savefig(output_path, dpi=200, bbox_inches="tight")
+    print("Saved:", output_path)
     plt.close()
+    return True
+
+
+def save_vit_attention_examples(
+    model: nn.Module,
+    x_raw: np.ndarray,
+    y_true,
+    y_pred,
+    class_names: List[str],
+    out_dir: str,
+    image_size: int,
+):
+    """Save tumor/error examples plus one representative attention map per class."""
+    attention_dir = os.path.join(out_dir, "attention_maps")
+    os.makedirs(attention_dir, exist_ok=True)
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    records = []
+
+    def save_selection(name: str, criteria: str, candidates: np.ndarray):
+        candidates = np.asarray(candidates, dtype=int)
+        record = {
+            "name": name,
+            "criteria": criteria,
+            "status": "not_available",
+            "test_index": None,
+            "true_label": None,
+            "predicted_label": None,
+        }
+        if candidates.size == 0:
+            print(f"Attention example unavailable: {name} ({criteria})")
+            records.append(record)
+            return
+
+        image_index = int(candidates[0])
+        record.update({
+            "status": "saved",
+            "test_index": image_index,
+            "true_label": class_names[int(y_true[image_index])],
+            "predicted_label": class_names[int(y_pred[image_index])],
+        })
+        saved = save_vit_attention_map(
+            model=model,
+            x_raw=x_raw,
+            y_true=y_true,
+            y_pred=y_pred,
+            class_names=class_names,
+            out_dir=attention_dir,
+            image_size=image_size,
+            out_name=f"attention_{name}.png",
+            image_index=image_index,
+            selection_title=name.replace("_", " "),
+        )
+        if not saved:
+            record["status"] = "skipped"
+        records.append(record)
+
+    if "tumor" in class_names:
+        tumor_index = class_names.index("tumor")
+        tumor_true = y_true == tumor_index
+        tumor_pred = y_pred == tumor_index
+        prediction_error = y_true != y_pred
+        save_selection(
+            "correct_tumor_patch",
+            "true=tumor and predicted=tumor",
+            np.flatnonzero(tumor_true & tumor_pred),
+        )
+        save_selection(
+            "misclassified_tumor_patch",
+            "prediction is wrong and tumor is either the true or predicted class",
+            np.flatnonzero(prediction_error & (tumor_true | tumor_pred)),
+        )
+        save_selection(
+            "false_positive_non_tumor_patch",
+            "true=non_tumor and predicted=tumor",
+            np.flatnonzero((~tumor_true) & tumor_pred),
+        )
+        save_selection(
+            "false_negative_tumor_patch",
+            "true=tumor and predicted=non_tumor",
+            np.flatnonzero(tumor_true & (~tumor_pred)),
+        )
+
+    for class_index, class_name in enumerate(class_names):
+        correct_candidates = np.flatnonzero((y_true == class_index) & (y_pred == class_index))
+        # Prefer a correct prediction for a class-level example; fall back to a true sample.
+        candidates = correct_candidates if correct_candidates.size else np.flatnonzero(y_true == class_index)
+        save_selection(
+            f"class_{class_name}",
+            f"representative true={class_name} patch (correct prediction preferred)",
+            candidates,
+        )
+
+    summary_path = os.path.join(attention_dir, "attention_examples_summary.json")
+    with open(summary_path, "w", encoding="utf-8") as summary_file:
+        json.dump({"image_size": image_size, "examples": records}, summary_file, indent=2)
+    print("Saved:", summary_path)
 
 
 # -----------------------------------------------------------------------------
 # PyTorch / timm / Ray Tune route
 # -----------------------------------------------------------------------------
 def build_model(config: Dict, device: torch.device, num_classes: int):
+    image_size = int(config.get("image_size", DEFAULT_IMAGE_SIZE))
+    patch_size = int(config.get("patch_size", DEFAULT_PATCH_SIZE))
+    vit_depth = str(config.get("vit_depth", DEFAULT_VIT_DEPTH))
+    validate_vit_architecture(image_size, patch_size, vit_depth)
+    model_name = config.get("model_name", get_vit_model_name(vit_depth, patch_size))
     return timm.create_model(
-        config.get("model_name", DEFAULT_MODEL_NAME),
+        model_name,
         pretrained=True,
         num_classes=int(num_classes),
-        img_size=IMAGE_SIZE,
+        img_size=image_size,
         drop_rate=config.get("drop_rate", 0.0),
         drop_path_rate=config.get("drop_path_rate", 0.0),
     ).to(device)
@@ -857,9 +1002,10 @@ def train_vit_one_config(
         "test": {class_names[i]: int(test_counts[i]) for i in range(num_classes)},
     }
 
-    train_ds = ColorectalDataset(x_train, y_train, train=True, out_size=IMAGE_SIZE)
-    val_ds = ColorectalDataset(x_val, y_val, train=False, out_size=IMAGE_SIZE)
-    test_ds = ColorectalDataset(x_test, y_test, train=False, out_size=IMAGE_SIZE)
+    image_size = int(config.get("image_size", DEFAULT_IMAGE_SIZE))
+    train_ds = ColorectalDataset(x_train, y_train, train=True, out_size=image_size)
+    val_ds = ColorectalDataset(x_val, y_val, train=False, out_size=image_size)
+    test_ds = ColorectalDataset(x_test, y_test, train=False, out_size=image_size)
 
     batch_size = int(config.get("batch_size", DEFAULT_BATCH_SIZE))
     accum_steps = int(config.get("accum_steps", DEFAULT_ACCUM_STEPS))
@@ -1072,14 +1218,14 @@ def train_vit_one_config(
             out_dir,
             max_images=16,
         )
-        save_vit_attention_map(
-            model,
-            x_test,
-            test_metrics["y_true"],
-            test_metrics["y_pred"],
-            class_names,
-            out_dir,
-            out_name="raytuned_attention_map.png",
+        save_vit_attention_examples(
+            model=model,
+            x_raw=x_test,
+            y_true=test_metrics["y_true"],
+            y_pred=test_metrics["y_pred"],
+            class_names=class_names,
+            out_dir=out_dir,
+            image_size=image_size,
         )
 
     return final_results
@@ -1090,7 +1236,7 @@ def run_ray_tune(args):
     from ray.tune import RunConfig
     from ray.tune.schedulers import ASHAScheduler
 
-    out_dir = get_task_output_dir(args.task)
+    out_dir = get_vit_output_dir(args)
     os.makedirs(out_dir, exist_ok=True)
 
     # Ray 2.x/3.x compatibility: when passing RunConfig to tune.Tuner,
@@ -1102,11 +1248,13 @@ def run_ray_tune(args):
         verbose=1,
     )
 
+    # Architecture is fixed for a single ablation run. Ray Tune searches only
+    # optimization/regularization settings, so results are comparable across models.
     search_space = {
-        "model_name": tune.choice([
-            "vit_small_patch16_224",
-            "vit_base_patch16_224",
-        ]),
+        "model_name": args.model_name,
+        "image_size": args.image_size,
+        "patch_size": args.patch_size,
+        "vit_depth": args.vit_depth,
         "lr": tune.loguniform(1e-5, 1e-3),
         "weight_decay": tune.loguniform(1e-6, 1e-2),
         "batch_size": tune.choice([8, 16]),
@@ -1171,7 +1319,7 @@ def run_ray_tune(args):
 
 
 def run_final_train(args):
-    out_dir = get_task_output_dir(args.task)
+    out_dir = get_vit_output_dir(args)
     if args.config_json is None:
         args.config_json = os.path.join(out_dir, "best_ray_config.json")
 
@@ -1180,6 +1328,22 @@ def run_final_train(args):
 
     with open(args.config_json, "r", encoding="utf-8") as f:
         config = json.load(f)
+
+    requested_architecture = {
+        "model_name": args.model_name,
+        "image_size": args.image_size,
+        "patch_size": args.patch_size,
+        "vit_depth": args.vit_depth,
+    }
+    for key, expected_value in requested_architecture.items():
+        saved_value = config.get(key)
+        if saved_value is None:
+            config[key] = expected_value
+        elif saved_value != expected_value:
+            raise ValueError(
+                f"Saved config {key}={saved_value!r} does not match the requested "
+                f"architecture value {expected_value!r}. Use the matching options."
+            )
 
     config["num_epochs"] = args.final_epochs
     # Allow --use-class-weights to enable class weighting even when the JSON
@@ -1380,15 +1544,142 @@ def run_autokeras(args):
 # -----------------------------------------------------------------------------
 # CLI
 # -----------------------------------------------------------------------------
+def prompt_task_choice() -> str:
+    options = [("binary", "binary"), ("multiclass", "multiclass")]
+    print("\nSelect classification type:")
+    for index, (_, label) in enumerate(options, start=1):
+        print(f"  {index}. {label}")
+
+    valid_by_index = {str(i): value for i, (value, _) in enumerate(options, start=1)}
+    valid_by_value = {value.lower(): value for value, _ in options}
+    while True:
+        raw = input("Please enter the option number or name: ").strip().lower()
+        if raw in valid_by_index:
+            return valid_by_index[raw]
+        if raw in valid_by_value:
+            return valid_by_value[raw]
+        print("Invalid input, please try again.")
+
+
+def prompt_image_size() -> int:
+    while True:
+        raw = input(
+            f"IMAGE_SIZE [default {DEFAULT_IMAGE_SIZE}; examples: 128, 224, 384]: "
+        ).strip()
+        if not raw:
+            return DEFAULT_IMAGE_SIZE
+        try:
+            image_size = int(raw)
+        except ValueError:
+            print("IMAGE_SIZE must be an integer.")
+            continue
+        if image_size > 0:
+            return image_size
+        print("IMAGE_SIZE must be positive.")
+
+
+def prompt_architecture_choice(label: str, choices: List, default):
+    print(f"\nSelect {label}:")
+    for index, choice in enumerate(choices, start=1):
+        suffix = " (default)" if choice == default else ""
+        print(f"  {index}. {choice}{suffix}")
+
+    values_by_index = {str(i): value for i, value in enumerate(choices, start=1)}
+    values_by_name = {str(value).lower(): value for value in choices}
+    while True:
+        raw = input(f"Enter option number or value [default {default}]: ").strip().lower()
+        if not raw:
+            return default
+        if raw in values_by_index:
+            return values_by_index[raw]
+        if raw in values_by_name:
+            return values_by_name[raw]
+        print("Invalid input, please try again.")
+
+
+def resolve_task(args) -> str:
+    return args.task if args.task is not None else prompt_task_choice()
+
+
+def resolve_vit_architecture(args):
+    """Resolve interactive/CLI ViT ablation values and keep them on args."""
+    if args.image_size is None:
+        args.image_size = prompt_image_size()
+    if args.patch_size is None:
+        args.patch_size = prompt_architecture_choice(
+            "patch size", [16, 32], DEFAULT_PATCH_SIZE
+        )
+    if args.vit_depth is None:
+        args.vit_depth = prompt_architecture_choice(
+            "ViT scale (tiny/small/base)", ["tiny", "small", "base"], DEFAULT_VIT_DEPTH
+        )
+
+    args.image_size = int(args.image_size)
+    args.patch_size = int(args.patch_size)
+    args.vit_depth = str(args.vit_depth)
+    validate_vit_architecture(args.image_size, args.patch_size, args.vit_depth)
+    args.model_name = get_vit_model_name(args.vit_depth, args.patch_size)
+    print(
+        "Selected ViT architecture: "
+        f"{args.model_name} | IMAGE_SIZE={args.image_size}"
+    )
+
+
+def save_pipeline_selection(args, out_dir: str):
+    os.makedirs(out_dir, exist_ok=True)
+    selection_path = os.path.join(out_dir, "pipeline_selection.json")
+    with open(selection_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "mode": args.mode,
+            "task": args.task,
+            "architecture": {
+                "model_name": args.model_name,
+                "image_size": args.image_size,
+                "patch_size": args.patch_size,
+                "vit_depth": args.vit_depth,
+            },
+            "use_class_weights": bool(args.use_class_weights),
+            "num_samples": args.num_samples,
+            "tune_epochs": args.tune_epochs,
+            "final_epochs": args.final_epochs,
+        }, f, indent=2)
+    print("Saved:", selection_path)
+
+
+def run_auto_train_pipeline(args):
+    args.task = resolve_task(args)
+    resolve_vit_architecture(args)
+    if args.task == "binary" and not args.use_class_weights:
+        args.use_class_weights = True
+        print("Enabled --use-class-weights automatically for binary classification.")
+
+    out_dir = get_vit_output_dir(args)
+    save_pipeline_selection(args, out_dir)
+    print(f"\nStarting auto training pipeline for task: {args.task}")
+    print("Stage 1/2: Ray Tune hyperparameter search")
+    run_ray_tune(args)
+    args.config_json = os.path.join(out_dir, "best_ray_config.json")
+    print("Stage 2/2: Final full training with the best Ray Tune config")
+    run_final_train(args)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Colorectal histology ViT tuning with Ray Tune and AutoKeras baseline.")
-    parser.add_argument("--mode", type=str, required=True, choices=["ray_tune", "final_train", "autokeras"],
-                        help="ray_tune: tune PyTorch ViT; final_train: train best Ray config fully; autokeras: run AutoKeras baseline")
+    parser.add_argument("--mode", type=str, default="auto_train", choices=["auto_train", "ray_tune", "final_train", "autokeras"],
+                        help="auto_train: choose task and ViT ablation options then run Ray Tune and final training automatically; ray_tune: tune one PyTorch ViT architecture; final_train: train the matching best Ray config fully; autokeras: run AutoKeras baseline")
     parser.add_argument("--npz-path", type=str, default=NPZ_PATH)
-    parser.add_argument("--task", type=str, default="multiclass", choices=["multiclass", "binary"],
-                        help="multiclass: original 8-class task; binary: patch-level tumor vs non-tumor task")
+    parser.add_argument("--task", type=str, default=None, choices=["multiclass", "binary"],
+                        help="multiclass: original 8-class task; binary: patch-level tumor vs non-tumor task. If omitted in auto_train mode, the script will ask interactively.")
     parser.add_argument("--use-class-weights", action="store_true",
                         help="Use balanced class weights. Recommended for binary tumor-vs-non-tumor because tumor is the minority class.")
+
+    # ViT architecture ablation options. Omit them in auto_train mode to choose interactively.
+    parser.add_argument("--image-size", type=int, default=None,
+                        help="ViT input size. Must be divisible by patch size, e.g. 128, 224, or 384.")
+    parser.add_argument("--patch-size", type=int, default=None, choices=[16, 32],
+                        help="ViT patch size: 16 or 32.")
+    parser.add_argument("--vit-depth", type=str, default=None, choices=["tiny", "small", "base"],
+                        help="ViT scale/capacity ablation (tiny, small, or base).")
 
     # Ray Tune options
     parser.add_argument("--num-samples", type=int, default=4, help="Number of Ray Tune trials. Increase if you have more time/GPU.")
@@ -1410,14 +1701,21 @@ def parse_args():
     parser.add_argument("--ak-max-samples", type=int, default=None,
                         help="Optional training subset for quick AutoKeras debugging, e.g. --ak-max-samples 1000")
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.mode != "auto_train" and args.task is None:
+        args.task = "multiclass"
+    return args
 
 
 def main():
     args = parse_args()
-    if args.mode == "ray_tune":
+    if args.mode == "auto_train":
+        run_auto_train_pipeline(args)
+    elif args.mode == "ray_tune":
+        resolve_vit_architecture(args)
         run_ray_tune(args)
     elif args.mode == "final_train":
+        resolve_vit_architecture(args)
         run_final_train(args)
     elif args.mode == "autokeras":
         run_autokeras(args)

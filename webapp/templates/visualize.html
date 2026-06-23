@@ -3,55 +3,110 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Visualization Dashboard</title>
-    <link rel="stylesheet" href="/static/style.css" />
+    <title>Colorectal ViT Lab | Results</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
   </head>
   <body>
-    <h2>Visualization Dashboard</h2>
-    <p>Select a task to view the saved output charts and visualization images from the trained models.</p>
+    <main class="app-shell">
+      <header class="hero">
+        <a class="brand" href="/" aria-label="Colorectal ViT Lab home">CVL</a>
+        <div class="hero-copy">
+          <p class="eyebrow">Evaluation output</p>
+          <h1>Results <em>gallery</em></h1>
+          <p class="lede">Browse curves, confusion matrices, error patches, and architecture-specific attention maps.</p>
+        </div>
+        <a class="text-link" href="/">Back to experiment console <span aria-hidden="true">&#8592;</span></a>
+      </header>
 
-    <div class="row">
-      <label>Task:
-        <select id="taskSelect">
-          {% for task in tasks %}
-            <option value="{{ task }}">{{ task }}</option>
-          {% endfor %}
-        </select>
-      </label>
-    </div>
-
-    <div id="imageGrid" class="image-grid"></div>
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Saved artifacts</p>
+            <h2>Filter an experiment</h2>
+          </div>
+          <span class="status-badge neutral">Images only</span>
+        </div>
+        <div class="gallery-controls">
+          <label class="control">
+            <span>Classification task</span>
+            <select id="taskSelect">
+              {% for task in tasks %}
+              <option value="{{ task }}">{{ task }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="control">
+            <span>Experiment</span>
+            <select id="experimentSelect"></select>
+          </label>
+        </div>
+        <div id="imageGrid" class="image-grid"></div>
+      </section>
+    </main>
 
     <script>
       const allImages = {{ images | tojson }};
+      const allExperiments = {{ experiments | tojson }};
       const taskSelect = document.getElementById('taskSelect');
+      const experimentSelect = document.getElementById('experimentSelect');
       const imageGrid = document.getElementById('imageGrid');
 
-      function renderImages(task) {
-        imageGrid.innerHTML = '';
-        const selectedImages = allImages[task] || [];
-        if (selectedImages.length === 0) {
-          imageGrid.innerHTML = '<p>No visualization images available for this task.</p>';
+      function encodePath(path) {
+        return path.split('/').map(encodeURIComponent).join('/');
+      }
+
+      function populateExperiments() {
+        const task = taskSelect.value;
+        const experiments = allExperiments[task] || [];
+        experimentSelect.replaceChildren();
+        const allOption = document.createElement('option');
+        allOption.value = 'all';
+        allOption.textContent = 'All saved outputs';
+        experimentSelect.appendChild(allOption);
+        experiments.forEach((experiment) => {
+          const option = document.createElement('option');
+          option.value = experiment.id;
+          option.textContent = experiment.label;
+          experimentSelect.appendChild(option);
+        });
+      }
+
+      function renderImages() {
+        const task = taskSelect.value;
+        const selectedExperiment = experimentSelect.value;
+        const images = (allImages[task] || []).filter((image) => (
+          selectedExperiment === 'all' || image.experiment_id === selectedExperiment
+        ));
+        imageGrid.replaceChildren();
+        if (!images.length) {
+          const empty = document.createElement('p');
+          empty.className = 'empty-gallery';
+          empty.textContent = 'No visualization images are available for this selection.';
+          imageGrid.appendChild(empty);
           return;
         }
-
-        selectedImages.forEach((fileName) => {
-          const card = document.createElement('div');
+        images.forEach((imageData) => {
+          const card = document.createElement('figure');
           card.className = 'image-card';
-          const img = document.createElement('img');
-          img.src = `/visualize_image/${task}/${encodeURIComponent(fileName)}`;
-          img.alt = fileName;
-          const caption = document.createElement('div');
+          const image = document.createElement('img');
+          image.loading = 'lazy';
+          image.src = `/visualize_image/${encodeURIComponent(task)}/${encodePath(imageData.filename)}`;
+          image.alt = imageData.caption;
+          const caption = document.createElement('figcaption');
           caption.className = 'image-caption';
-          caption.textContent = fileName;
-          card.appendChild(img);
-          card.appendChild(caption);
+          caption.textContent = imageData.filename;
+          card.append(image, caption);
           imageGrid.appendChild(card);
         });
       }
 
-      taskSelect.addEventListener('change', () => renderImages(taskSelect.value));
-      renderImages(taskSelect.value);
+      taskSelect.addEventListener('change', () => {
+        populateExperiments();
+        renderImages();
+      });
+      experimentSelect.addEventListener('change', renderImages);
+      populateExperiments();
+      renderImages();
     </script>
   </body>
 </html>
