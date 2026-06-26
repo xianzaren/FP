@@ -1,4 +1,4 @@
-"""
+﻿"""
 colorectal_autokeras_raytune_output_auto.py
 
 A modified version of the user's PyTorch/timm ViT colorectal histology experiment.
@@ -41,8 +41,8 @@ import json
 import inspect
 import random
 import argparse
+from pathlib import Path
 from typing import Dict, Tuple, Optional, List
-
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -115,7 +115,8 @@ autocast_ctx = get_autocast()
 # Base config, adapted from the uploaded script
 # -----------------------------------------------------------------------------
 SEED = 42
-NPZ_PATH = "data/colorectal_histology.npz"
+BASE_DIR = Path(__file__).resolve().parent
+NPZ_PATH = str(BASE_DIR / "data" / "colorectal_histology.npz")
 MULTICLASS_CLASS_NAMES = [
     "tumor",
     "stroma",
@@ -179,7 +180,7 @@ DEFAULT_WEIGHT_DECAY = 1e-4
 DEFAULT_LABEL_SMOOTHING = 0.1
 DEFAULT_MODEL_NAME = "vit_base_patch16_224"
 
-OUTPUT_DIR = "output/colorectal_exp_auto"
+OUTPUT_DIR = str(BASE_DIR / "output" / "colorectal_exp_auto")
 RAY_DIR = OUTPUT_DIR
 AK_DIR = OUTPUT_DIR
 FINAL_DIR = OUTPUT_DIR
@@ -653,6 +654,284 @@ def plot_misclassified_patches(
     print("Saved:", path)
     plt.close()
 
+
+
+
+def analyze_failure_modes(
+    x_raw: np.ndarray,
+    y_true,
+    y_pred,
+    y_score,
+    class_names: List[str],
+    out_dir: str,
+    prefix: str,
+    top_k_pairs: int = 8,
+    top_k_cases: int = 10,
+) -> Dict:
+    """Summarize common failure modes and save both JSON and text reports.
+
+    Brightness/saturation are simple image-statistics proxies intended to flag
+    potential staining or contrast shifts; they are not pathology-grade stain
+    normalization measurements.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    analysis_dir = os.path.join(out_dir, "failure_analysis")
+    os.makedirs(analysis_dir, exist_ok=True)
+
+    y_true = np.asarray(y_true, dtype=int)
+    y_pred = np.asarray(y_pred, dtype=int)
+    y_score = np.asarray(y_score, dtype=np.float32)
+    x_raw = np.asarray(x_raw)
+    num_classes = len(class_names)
+    cm = confusion_matrix(y_true, y_pred, labels=list(range(num_classes)))
+    support = cm.sum(axis=1)
+    confidences = (
+        np.max(y_score, axis=1)
+        if y_score.ndim == 2 and y_score.shape[0] == len(y_true)
+        else np.full(len(y_true), np.nan, dtype=np.float32)
+    )
+    correct_mask = y_true == y_pred
+    wrong_mask = ~correct_mask
+
+    x_float = x_raw.astype(np.float32) / 255.0
+    brightness = x_float.mean(axis=(1, 2, 3))
+    saturation = (x_float.max(axis=3) - x_float.min(axis=3)).mean(axis=(1, 2))
+
+    def mean_or_none(values: np.ndarray):
+        return None if values.size == 0 else float(np.mean(values))
+
+    def build_case_records(indices: np.ndarray) -> List[Dict]:
+        records = []
+        for idx in indices.tolist():
+            rec = {
+                "index": int(idx),
+                "true_class": class_names[int(y_true[idx])],
+                "predicted_class": class_names[int(y_pred[idx])],
+                "confidence": None if np.isnan(confidences[idx]) else float(confidences[idx]),
+                "brightness_mean": float(brightness[idx]),
+                "saturation_mean": float(saturation[idx]),
+            }
+            if y_score.ndim == 2 and y_score.shape[1] == num_classes:
+                rec["true_class_probability"] = float(y_score[idx, int(y_true[idx])])
+                rec["predicted_class_probability"] = float(y_score[idx, int(y_pred[idx])])
+            records.append(rec)
+        return records
+
+    confusion_pairs = []
+    for true_idx in range(num_classes):
+        row_total = int(support[true_idx])
+        if row_total == 0:
+            continue
+        for pred_idx in range(num_classes):
+            if true_idx == pred_idx:
+                continue
+            count = int(cm[true_idx, pred_idx])
+            if count <= 0:
+                continue
+            confusion_pairs.append({
+                "true_class": class_names[true_idx],
+                "predicted_class": class_names[pred_idx],
+                "count": count,
+                "rate_within_true_class": float(count / row_total),
+            })
+    confusion_pairs.sort(key=lambda item: (-item["count"], -item["rate_within_true_class"]))
+
+    per_class_error_rate = []
+    for idx, name in enumerate(class_names):
+        class_support = int(support[idx])
+        correct_count = int(cm[idx, idx])
+        error_count = int(class_support - correct_count)
+        class_item = {
+            "class_name": name,
+            "support": class_support,
+            "correct": correct_count,
+            "errors": error_count,
+            "error_rate": float(error_count / class_support) if class_support > 0 else None,
+            "most_common_wrong_prediction": None,
+        }
+        if error_count > 0:
+            row = cm[idx].copy()
+            row[idx] = 0
+            worst_pred = int(np.argmax(row))
+            class_item["most_common_wrong_prediction"] = {
+                "class_name": class_names[worst_pred],
+                "count": int(row[worst_pred]),
+            }
+        per_class_error_rate.append(class_item)
+    per_class_error_rate.sort(
+        key=lambda item: (-1.0 if item["error_rate"] is None else -item["error_rate"], -item["errors"])
+    )
+
+    low_conf_correct_idx = np.flatnonzero(correct_mask & ~np.isnan(confidences))
+    low_conf_correct_idx = low_conf_correct_idx[np.argsort(confidences[low_conf_correct_idx])][:top_k_cases]
+    high_conf_wrong_idx = np.flatnonzero(wrong_mask & ~np.isnan(confidences))
+    high_conf_wrong_idx = high_conf_wrong_idx[np.argsort(-confidences[high_conf_wrong_idx])][:top_k_cases]
+
+    staining_proxy = {
+        "brightness_mean_correct": mean_or_none(brightness[correct_mask]),
+        "brightness_mean_wrong": mean_or_none(brightness[wrong_mask]),
+        "saturation_mean_correct": mean_or_none(saturation[correct_mask]),
+        "saturation_mean_wrong": mean_or_none(saturation[wrong_mask]),
+        "wrong_minus_correct_brightness": (
+            None
+            if not np.any(correct_mask) or not np.any(wrong_mask)
+            else float(np.mean(brightness[wrong_mask]) - np.mean(brightness[correct_mask]))
+        ),
+        "wrong_minus_correct_saturation": (
+            None
+            if not np.any(correct_mask) or not np.any(wrong_mask)
+            else float(np.mean(saturation[wrong_mask]) - np.mean(saturation[correct_mask]))
+        ),
+        "dark_wrong_cases": [],
+        "bright_wrong_cases": [],
+    }
+    wrong_indices = np.flatnonzero(wrong_mask)
+    if wrong_indices.size > 0:
+        darkest_wrong = wrong_indices[np.argsort(brightness[wrong_indices])][:top_k_cases]
+        brightest_wrong = wrong_indices[np.argsort(-brightness[wrong_indices])][:top_k_cases]
+        staining_proxy["dark_wrong_cases"] = build_case_records(darkest_wrong)
+        staining_proxy["bright_wrong_cases"] = build_case_records(brightest_wrong)
+
+    binary_focus = {}
+    tumor_misclassification = None
+    if "tumor" in class_names:
+        tumor_idx = class_names.index("tumor")
+        tumor_true_mask = y_true == tumor_idx
+        tumor_pred_mask = y_pred == tumor_idx
+        binary_focus = {
+            "false_negative_tumor_count": int(np.sum(tumor_true_mask & (~tumor_pred_mask))),
+            "false_positive_tumor_count": int(np.sum((~tumor_true_mask) & tumor_pred_mask)),
+        }
+        tumor_row = cm[tumor_idx].copy()
+        tumor_row[tumor_idx] = 0
+        if np.sum(tumor_row) > 0:
+            pred_idx = int(np.argmax(tumor_row))
+            tumor_misclassification = {
+                "predicted_as": class_names[pred_idx],
+                "count": int(tumor_row[pred_idx]),
+                "rate_within_tumor": float(tumor_row[pred_idx] / max(int(support[tumor_idx]), 1)),
+            }
+
+    pair_checks = {}
+    if "stroma" in class_names and "complex" in class_names:
+        stroma_idx = class_names.index("stroma")
+        complex_idx = class_names.index("complex")
+        pair_checks["stroma_complex_confusion"] = {
+            "stroma_as_complex": int(cm[stroma_idx, complex_idx]),
+            "complex_as_stroma": int(cm[complex_idx, stroma_idx]),
+            "combined_count": int(cm[stroma_idx, complex_idx] + cm[complex_idx, stroma_idx]),
+            "stroma_as_complex_rate": float(cm[stroma_idx, complex_idx] / max(int(support[stroma_idx]), 1)),
+            "complex_as_stroma_rate": float(cm[complex_idx, stroma_idx] / max(int(support[complex_idx]), 1)),
+        }
+
+    analysis = {
+        "num_samples": int(len(y_true)),
+        "num_correct": int(np.sum(correct_mask)),
+        "num_wrong": int(np.sum(wrong_mask)),
+        "overall_error_rate": float(np.mean(wrong_mask)) if len(y_true) > 0 else None,
+        "top_confused_class_pairs": confusion_pairs[:top_k_pairs],
+        "tumor_most_common_misclassification": tumor_misclassification,
+        "tumor_binary_error_counts": binary_focus,
+        "pair_checks": pair_checks,
+        "per_class_error_rate": per_class_error_rate,
+        "low_confidence_correct_cases": build_case_records(low_conf_correct_idx),
+        "high_confidence_wrong_cases": build_case_records(high_conf_wrong_idx),
+        "staining_proxy_analysis": staining_proxy,
+    }
+
+    summary_lines = [
+        f"Failure mode analysis for {prefix}",
+        f"Samples: {analysis['num_samples']}",
+        (
+            f"Errors: {analysis['num_wrong']} / {analysis['num_samples']} "
+            f"(error_rate={analysis['overall_error_rate']:.4f})"
+            if analysis["overall_error_rate"] is not None else "Errors: unavailable"
+        ),
+        "",
+        "Top confused class pairs:",
+    ]
+    if analysis["top_confused_class_pairs"]:
+        for item in analysis["top_confused_class_pairs"]:
+            summary_lines.append(
+                f"- {item['true_class']} -> {item['predicted_class']}: {item['count']} "
+                f"(rate within true class {item['rate_within_true_class']:.4f})"
+            )
+    else:
+        summary_lines.append("- None")
+
+    summary_lines.append("")
+    summary_lines.append("Per-class error rates:")
+    for item in analysis["per_class_error_rate"]:
+        error_rate_text = "n/a" if item["error_rate"] is None else f"{item['error_rate']:.4f}"
+        wrong_pred_text = "none"
+        if item["most_common_wrong_prediction"] is not None:
+            wrong_pred = item["most_common_wrong_prediction"]
+            wrong_pred_text = f"{wrong_pred['class_name']} ({wrong_pred['count']})"
+        summary_lines.append(
+            f"- {item['class_name']}: support={item['support']}, errors={item['errors']}, "
+            f"error_rate={error_rate_text}, top_wrong={wrong_pred_text}"
+        )
+
+    if analysis["tumor_binary_error_counts"]:
+        summary_lines.extend([
+            "",
+            "Tumor-focused error counts:",
+            f"- False negative tumor count: {analysis['tumor_binary_error_counts']['false_negative_tumor_count']}",
+            f"- False positive tumor count: {analysis['tumor_binary_error_counts']['false_positive_tumor_count']}",
+        ])
+        if analysis["tumor_most_common_misclassification"] is not None:
+            tumor_top = analysis["tumor_most_common_misclassification"]
+            summary_lines.append(
+                f"- Tumor most often predicted as {tumor_top['predicted_as']} "
+                f"({tumor_top['count']}, rate {tumor_top['rate_within_tumor']:.4f})"
+            )
+
+    if analysis["pair_checks"]:
+        summary_lines.extend(["", "Requested pair checks:"])
+        for name, item in analysis["pair_checks"].items():
+            summary_lines.append(f"- {name}: {json.dumps(item, ensure_ascii=False)}")
+
+    summary_lines.extend(["", "Low-confidence correct cases:"])
+    if analysis["low_confidence_correct_cases"]:
+        for item in analysis["low_confidence_correct_cases"]:
+            summary_lines.append(
+                f"- idx={item['index']} true={item['true_class']} pred={item['predicted_class']} "
+                f"conf={item['confidence']:.4f} brightness={item['brightness_mean']:.4f} "
+                f"saturation={item['saturation_mean']:.4f}"
+            )
+    else:
+        summary_lines.append("- None")
+
+    summary_lines.extend(["", "High-confidence wrong cases:"])
+    if analysis["high_confidence_wrong_cases"]:
+        for item in analysis["high_confidence_wrong_cases"]:
+            summary_lines.append(
+                f"- idx={item['index']} true={item['true_class']} pred={item['predicted_class']} "
+                f"conf={item['confidence']:.4f} brightness={item['brightness_mean']:.4f} "
+                f"saturation={item['saturation_mean']:.4f}"
+            )
+    else:
+        summary_lines.append("- None")
+
+    proxy = analysis["staining_proxy_analysis"]
+    summary_lines.extend([
+        "",
+        "Staining proxy analysis:",
+        f"- Mean brightness correct vs wrong: {proxy['brightness_mean_correct']} vs {proxy['brightness_mean_wrong']}",
+        f"- Mean saturation correct vs wrong: {proxy['saturation_mean_correct']} vs {proxy['saturation_mean_wrong']}",
+        f"- Wrong minus correct brightness: {proxy['wrong_minus_correct_brightness']}",
+        f"- Wrong minus correct saturation: {proxy['wrong_minus_correct_saturation']}",
+    ])
+
+    json_path = os.path.join(analysis_dir, f"{prefix}_failure_analysis.json")
+    txt_path = os.path.join(analysis_dir, f"{prefix}_failure_analysis.txt")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(analysis, f, indent=2, ensure_ascii=False)
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(summary_lines) + "\n")
+    print("Saved:", json_path)
+    print("Saved:", txt_path)
+    return analysis
 
 def _preprocess_one_image_for_vit(img_uint8_hwc: np.ndarray, out_size: int) -> torch.Tensor:
     mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -1183,6 +1462,16 @@ def train_vit_one_config(
             zero_division=0,
         ))
 
+        failure_analysis = analyze_failure_modes(
+            x_raw=x_test,
+            y_true=test_metrics["y_true"],
+            y_pred=test_metrics["y_pred"],
+            y_score=test_metrics["y_score"],
+            class_names=class_names,
+            out_dir=out_dir,
+            prefix="raytuned",
+        )
+
         final_results.update({
             "test_loss": float(test_metrics["loss"]),
             "test_accuracy": float(test_metrics["acc"]),
@@ -1194,6 +1483,7 @@ def train_vit_one_config(
             "test_binary_focus_metrics": test_metrics["binary_focus_metrics"],
             "test_confusion_matrix": test_metrics["cm"].tolist(),
             "classification_report": test_metrics["classification_report"],
+            "failure_mode_analysis": failure_analysis,
         })
 
         result_path = os.path.join(out_dir, "results_raytuned_vit_final.json")
@@ -1504,6 +1794,16 @@ def run_autokeras(args):
     model.save(model_path)
     print("Saved exported AutoKeras model:", model_path)
 
+    failure_analysis = analyze_failure_modes(
+        x_raw=x_test,
+        y_true=y_test,
+        y_pred=y_pred,
+        y_score=y_score,
+        class_names=class_names,
+        out_dir=out_dir,
+        prefix="autokeras",
+    )
+
     results = {
         "dataset": "colorectal_histology",
         "model": "AutoKeras ImageClassifier baseline",
@@ -1520,6 +1820,7 @@ def run_autokeras(args):
         "use_class_weights": bool(args.use_class_weights),
         "classification_report_text": report,
         "confusion_matrix": cm.tolist(),
+        "failure_mode_analysis": failure_analysis,
     }
     result_path = os.path.join(out_dir, "results_autokeras_baseline.json")
     with open(result_path, "w", encoding="utf-8") as f:
@@ -1700,12 +2001,11 @@ def parse_args():
     parser.add_argument("--ak-patience", type=int, default=3)
     parser.add_argument("--ak-max-samples", type=int, default=None,
                         help="Optional training subset for quick AutoKeras debugging, e.g. --ak-max-samples 1000")
-
     args = parser.parse_args()
+    args.npz_path = str(Path(args.npz_path).expanduser().resolve())
     if args.mode != "auto_train" and args.task is None:
         args.task = "multiclass"
     return args
-
 
 def main():
     args = parse_args()
@@ -1727,3 +2027,4 @@ if __name__ == "__main__":
     from multiprocessing import freeze_support
     freeze_support()
     main()
+
